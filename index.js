@@ -5,25 +5,49 @@ const ts = require("typescript");
 const path = require("path");
 const assert = require("assert");
 const semver = require("semver");
+const crypto = require("crypto");
 
 /** @typedef {import("typescript").Node} Node */
 /**
  * @param {string} src
  * @param {string} target
  * @param {import("semver").SemVer} targetVersion
+ * @param {boolean} useChecksum
  */
-function main(src, target, targetVersion) {
+function main(src, target, targetVersion, useChecksum) {
   if (!src || !target) {
     console.log("Usage: node index.js test test/ts3.4 [--to=3.4]");
     process.exit(1);
   }
 
+  const inputPaths = sh.find(path.join(src)).filter(f => f.endsWith(".d.ts") && f.indexOf("node_modules") === -1);
+
+  let checksumPath, inputChecksum;
+  if (useChecksum) {
+    checksumPath = path.join(target, "downlevel-dts.sha1");
+
+    let lastChecksum;
+    try {
+      lastChecksum = fs.readFileSync(checksumPath, "utf8");
+    } catch (err) {
+      // no-op
+    }
+
+    const hash = crypto.createHash("sha1");
+    inputPaths.sort().forEach(inputPath => {
+      hash.update(fs.readFileSync(inputPath, "utf8"));
+    });
+
+    // compare checksums and, if equal, early return
+    inputChecksum = hash.digest().toString("hex");
+    if (lastChecksum === inputChecksum) {
+      return;
+    }
+  }
+
   // TODO: target path is probably wrong for absolute src (or target?)
   // TODO: Probably will want to alter package.json if discovered in the right place.
-  const program = ts.createProgram(
-    sh.find(path.join(src)).filter(f => f.endsWith(".d.ts") && !/node_modules/.test(f)),
-    {}
-  );
+  const program = ts.createProgram(inputPaths, {});
   const checker = program.getTypeChecker(); // just used for setting parent pointers right now
   const files = mapDefined(program.getRootFileNames(), program.getSourceFile);
   const printer = ts.createPrinter({
@@ -34,6 +58,11 @@ function main(src, target, targetVersion) {
     const targetPath = path.join(target, path.resolve(f.fileName).slice(path.resolve(src).length));
     sh.mkdir("-p", path.dirname(targetPath));
     fs.writeFileSync(targetPath, dedupeTripleSlash(printer.printFile(f)));
+  }
+
+  // commit checksum, if instructed
+  if (useChecksum && checksumPath && inputChecksum) {
+    fs.writeFileSync(checksumPath, inputChecksum);
   }
 }
 module.exports.main = main;
@@ -47,7 +76,9 @@ if (!(/** @type {*} */ (module.parent))) {
     const userInput = semver.coerce(to.split("=")[1]);
     if (userInput) targetVersion = userInput;
   }
-  main(src, target, targetVersion);
+
+  const checksum = process.argv.find(arg => arg.startsWith("--checksum"));
+  main(src, target, targetVersion, !!checksum);
 }
 
 /**
